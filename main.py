@@ -126,8 +126,28 @@ _maps_cache_time = 0
 
 @app.get("/health")
 async def health():
-    """Health check endpoint"""
-    return {"status": "ok", "service": "GD Rhythm Trainer Backend"}
+    """Health check endpoint for Coolify and monitoring"""
+    try:
+        # Check if critical directories are accessible (results dir is not critical)
+        maps_accessible = MAPS_DIR.exists() and MAPS_DIR.is_dir()
+        music_accessible = MUSIC_DIR.exists() and MUSIC_DIR.is_dir()
+
+        if not all([maps_accessible, music_accessible]):
+            raise HTTPException(status_code=503, detail="Critical directories not accessible")
+
+        return {
+            "status": "healthy",
+            "service": "GD Rhythm Trainer Backend",
+            "timestamp": time.time(),
+            "directories": {
+                "maps": maps_accessible,
+                "music": music_accessible
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Health check failed: {str(e)}")
 
 
 @app.get("/api/storage", response_model=StorageInfo)

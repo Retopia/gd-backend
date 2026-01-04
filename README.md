@@ -55,6 +55,28 @@ Once running, visit:
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
 
+### Health Check
+
+For monitoring and Coolify deployments:
+
+**Endpoint:** `GET /health`
+
+Returns:
+```json
+{
+  "status": "healthy",
+  "service": "GD Rhythm Trainer Backend",
+  "timestamp": 1234567890.123,
+  "directories": {
+    "maps": true,
+    "music": true
+  }
+}
+```
+
+- **200 OK** - Service is healthy (critical directories accessible)
+- **503 Service Unavailable** - Service is unhealthy (maps or music directories not accessible)
+
 ## API Endpoints
 
 ### Maps
@@ -88,3 +110,24 @@ Once running, visit:
 
 - Maps: `.gdr` (msgpack format)
 - Music: `.mp3`, `.wav`, `.ogg`, `.flac`, `.m4a`, `.aac`
+
+## Deployment
+
+### Coolify
+
+**Health Check Path:** `/health`
+**Port:** 8000 (or configured PORT)
+
+Required environment variables:
+- `HOST` - Server host
+- `PORT` - Server port
+- `CORS_ORIGINS` - Set to your frontend URL (e.g., `https://your-frontend.com`)
+- `STORAGE_LIMIT_MB` - Storage limit
+- `MAX_FILE_SIZE_MB` - Max upload size
+
+**Persistent Storage (Volume Mounts):**
+Mount these directories to preserve data across deployments:
+- `./maps` → `/app/maps` - Map files (REQUIRED)
+- `./music` → `/app/music` - Music files (REQUIRED)
+
+Note: `./results` directory is auto-created and does not need persistence (temporary export files)
