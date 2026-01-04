@@ -23,6 +23,18 @@ FastAPI backend for the Geometry Dash Rhythm Trainer application.
 pip install -r requirements.txt
 ```
 
+### Environment Variables
+
+Create a `.env` file in the backend directory (copy from `.env.example`):
+
+```bash
+HOST=0.0.0.0
+PORT=8000
+CORS_ORIGINS=*
+STORAGE_LIMIT_MB=500
+MAX_FILE_SIZE_MB=100
+```
+
 ### Development
 
 ```bash
@@ -35,7 +47,7 @@ Or with uvicorn directly:
 uvicorn main:app --reload
 ```
 
-The API will be available at `http://localhost:8000`
+The API will be available at `http://localhost:8000` (or your configured PORT)
 
 ### API Documentation
 

@@ -8,18 +8,31 @@ from pydantic import BaseModel
 import shutil
 import zipfile
 import io
+import os
+from dotenv import load_dotenv
 
 from game_logic import (
     load_gdr, infer_fps, build_expected_events, build_visual_notes,
     compute_compact_stats, export_results_text, ResultRow
 )
 
+# Load environment variables
+load_dotenv()
+
+# Configuration from environment
+HOST = os.getenv("HOST", "0.0.0.0")
+PORT = int(os.getenv("PORT", "8000"))
+CORS_ORIGINS_STR = os.getenv("CORS_ORIGINS", "*")
+CORS_ORIGINS = CORS_ORIGINS_STR.split(",") if CORS_ORIGINS_STR != "*" else ["*"]
+STORAGE_LIMIT_MB = int(os.getenv("STORAGE_LIMIT_MB", "500"))
+MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "100"))
+
 app = FastAPI(title="GD Rhythm Trainer API", version="1.0.0")
 
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -34,8 +47,9 @@ MAPS_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 MUSIC_DIR.mkdir(exist_ok=True)
 
-# Storage limit: 1000 MB
-STORAGE_LIMIT_BYTES = 1000 * 1024 * 1024 # 1000 MB
+# Storage limit in bytes
+STORAGE_LIMIT_BYTES = STORAGE_LIMIT_MB * 1024 * 1024
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 
 def calculate_storage_usage():
@@ -604,20 +618,17 @@ async def upload_music(file: UploadFile = File(...)):
     if ext not in [".mp3", ".wav", ".ogg"]:
         raise HTTPException(status_code=400, detail="Only .mp3, .wav, and .ogg files are allowed")
 
-    # Check file size (100 MB limit)
-    MAX_SIZE_MB = 100
-    MAX_SIZE_BYTES = MAX_SIZE_MB * 1024 * 1024
-    
+    # Check file size
     # Read first chunk to check size
     file.file.seek(0, 2)  # Seek to end
     file_size = file.file.tell()
     file.file.seek(0)  # Seek back to start
-    
-    if file_size > MAX_SIZE_BYTES:
+
+    if file_size > MAX_FILE_SIZE_BYTES:
         size_mb = file_size / 1024 / 1024
         raise HTTPException(
             status_code=413,
-            detail=f"File '{file.filename}' is too large ({size_mb:.1f}MB). Maximum size is {MAX_SIZE_MB}MB."
+            detail=f"File '{file.filename}' is too large ({size_mb:.1f}MB). Maximum size is {MAX_FILE_SIZE_MB}MB."
         )
     
     # Check storage limit
@@ -699,4 +710,4 @@ async def delete_music(filename: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host=HOST, port=PORT, reload=True)
