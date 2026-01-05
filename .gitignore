@@ -64,12 +64,12 @@ music/*.ogg
 music/*.flac
 music/*.m4a
 music/*.aac
-results/*.txt
+leniency/*.json
 
 # Keep directories but ignore contents
 !maps/.gitkeep
 !music/.gitkeep
-!results/.gitkeep
+!leniency/.gitkeep
 
 # OS
 .DS_Store

@@ -108,14 +108,24 @@ def compute_compact_stats(results: List[ResultRow], expected_count: int) -> Dict
     extras = [r for r in results if math.isnan(r.expected_t)]
     hit_offsets = [r.offset_ms for r in hits if r.offset_ms is not None]
 
-    if hit_offsets:
-        mean = sum(hit_offsets) / len(hit_offsets)
-        mae = sum(abs(x) for x in hit_offsets) / len(hit_offsets)
-        worst = max(hit_offsets, key=lambda v: abs(v))
+    # Separate early (negative) and late (positive) offsets
+    early_offsets = [x for x in hit_offsets if x < 0]
+    late_offsets = [x for x in hit_offsets if x > 0]
+
+    if early_offsets:
+        mean_early = sum(early_offsets) / len(early_offsets)
     else:
-        mean = 0.0
+        mean_early = 0.0
+
+    if late_offsets:
+        mean_late = sum(late_offsets) / len(late_offsets)
+    else:
+        mean_late = 0.0
+
+    if hit_offsets:
+        mae = sum(abs(x) for x in hit_offsets) / len(hit_offsets)
+    else:
         mae = 0.0
-        worst = 0.0
 
     # Completion = fraction of expected events that were judged (hit or miss)
     judged = len([r for r in results if not math.isnan(r.expected_t)])
@@ -125,9 +135,9 @@ def compute_compact_stats(results: List[ResultRow], expected_count: int) -> Dict
         "hits": float(len(hits)),
         "misses": float(len(misses)),
         "extras": float(len(extras)),
-        "mean": float(mean),
+        "mean_early": float(mean_early),
+        "mean_late": float(mean_late),
         "mae": float(mae),
-        "worst": float(worst),
         "completion": float(completion),
     }
 

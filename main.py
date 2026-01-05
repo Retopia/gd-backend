@@ -9,6 +9,7 @@ import shutil
 import zipfile
 import io
 import os
+import json
 from dotenv import load_dotenv
 
 from game_logic import (
@@ -42,10 +43,12 @@ app.add_middleware(
 MAPS_DIR = Path(__file__).parent / "maps"
 RESULTS_DIR = Path(__file__).parent / "results"
 MUSIC_DIR = Path(__file__).parent / "music"
+LENIENCY_DIR = Path(__file__).parent / "leniency"
 
 MAPS_DIR.mkdir(exist_ok=True)
 RESULTS_DIR.mkdir(exist_ok=True)
 MUSIC_DIR.mkdir(exist_ok=True)
+LENIENCY_DIR.mkdir(exist_ok=True)
 
 # Storage limit in bytes
 STORAGE_LIMIT_BYTES = STORAGE_LIMIT_MB * 1024 * 1024
@@ -64,6 +67,20 @@ def calculate_storage_usage():
 
 
 # Pydantic models for request/response
+class EventLeniency(BaseModel):
+    early_ms: Optional[float] = None
+    late_ms: Optional[float] = None
+
+    class Config:
+        exclude_none = True
+
+
+class LeniencyConfig(BaseModel):
+    default_early_ms: float = 20.833  # 5 ticks at 240 FPS
+    default_late_ms: float = 20.833   # 5 ticks at 240 FPS
+    custom: Dict[str, EventLeniency] = {}
+
+
 class MapInfo(BaseModel):
     name: str
     events: int
@@ -78,6 +95,7 @@ class LoadedMap(BaseModel):
     duration: float
     events: List[Dict[str, Any]]
     notes: List[Dict[str, Any]]
+    leniency: Optional[LeniencyConfig] = None
 
 
 class InputEvent(BaseModel):
@@ -93,16 +111,28 @@ class EvaluateRequest(BaseModel):
     hold_min_frames: int = 3
     input_events: List[InputEvent]
     end_time: Optional[float] = None
+    press_only_mode: bool = False
+
+
+class DetailedResult(BaseModel):
+    idx: int
+    kind: str
+    expected_t: float
+    expected_frame: int
+    actual_t: Optional[float]
+    offset_ms: Optional[float]
+    verdict: str
 
 
 class StatsResponse(BaseModel):
     hits: float
     misses: float
     extras: float
-    mean: float
+    mean_early: float
+    mean_late: float
     mae: float
-    worst: float
     completion: float
+    detailed_results: List[DetailedResult] = []
 
 
 class ExportResponse(BaseModel):
@@ -233,6 +263,9 @@ async def load_map(
         if duration <= 0.0 and expected:
             duration = expected[-1].t
 
+        # Load leniency configuration
+        leniency_config = load_leniency_config(map_name)
+
         return LoadedMap(
             name=map_path.name,
             fps=fps,
@@ -254,6 +287,7 @@ async def load_map(
                 }
                 for n in notes
             ],
+            leniency=leniency_config,
         )
     except HTTPException:
         raise
@@ -328,7 +362,24 @@ async def evaluate_results(request: EvaluateRequest):
         if not expected:
             raise HTTPException(status_code=400, detail="No inputs found for this button/player")
 
-        win_s = request.hit_window_ms / 1000.0
+        # Load leniency configuration
+        leniency_config = load_leniency_config(request.map_name)
+
+        def get_leniency_window(event_idx: int) -> tuple[float, float]:
+            """Get early and late leniency windows for an event (in seconds)"""
+            idx_str = str(event_idx)
+            early_ms = leniency_config.default_early_ms
+            late_ms = leniency_config.default_late_ms
+
+            if idx_str in leniency_config.custom:
+                leniency = leniency_config.custom[idx_str]
+                if leniency.early_ms is not None:
+                    early_ms = leniency.early_ms
+                if leniency.late_ms is not None:
+                    late_ms = leniency.late_ms
+
+            return early_ms / 1000.0, late_ms / 1000.0
+
         results = []
         next_idx = 0
 
@@ -337,19 +388,33 @@ async def evaluate_results(request: EvaluateRequest):
             actual_t = input_evt.actual_t
             kind = input_evt.kind
 
-            # Mark misses for events that have passed
-            while next_idx < len(expected) and actual_t > expected[next_idx].t + win_s:
+            # Skip release events in press-only mode
+            if request.press_only_mode and kind == "up":
+                continue
+
+            # Mark misses for events that have passed (using late window since that's the positive offset)
+            while next_idx < len(expected):
                 ev = expected[next_idx]
-                results.append(ResultRow(
-                    idx=ev.idx,
-                    kind=ev.kind,
-                    expected_t=ev.t,
-                    expected_frame=ev.frame,
-                    actual_t=None,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
-                next_idx += 1
+
+                # Skip release events in press-only mode
+                if request.press_only_mode and ev.kind == "up":
+                    next_idx += 1
+                    continue
+
+                _, late_win_s = get_leniency_window(ev.idx)
+                if actual_t > ev.t + late_win_s:
+                    results.append(ResultRow(
+                        idx=ev.idx,
+                        kind=ev.kind,
+                        expected_t=ev.t,
+                        expected_frame=ev.frame,
+                        actual_t=None,
+                        offset_ms=None,
+                        verdict="miss",
+                    ))
+                    next_idx += 1
+                else:
+                    break
 
             if next_idx >= len(expected):
                 results.append(ResultRow(
@@ -377,7 +442,12 @@ async def evaluate_results(request: EvaluateRequest):
                 continue
 
             dt = actual_t - ev.t
-            if abs(dt) <= win_s:
+            early_win_s, late_win_s = get_leniency_window(ev.idx)
+
+            # Check if within leniency window (asymmetric)
+            is_hit = (dt < 0 and abs(dt) <= early_win_s) or (dt >= 0 and dt <= late_win_s)
+
+            if is_hit:
                 results.append(ResultRow(
                     idx=ev.idx,
                     kind=ev.kind,
@@ -399,24 +469,48 @@ async def evaluate_results(request: EvaluateRequest):
                 ))
             next_idx += 1
 
-        # Mark remaining events as misses, matching original logic
-        # Only mark as miss if the event's hit window has closed (end_time > event.t + window)
+        # Mark remaining events as misses
         end_t = request.end_time if request.end_time is not None else float('inf')
-        while next_idx < len(expected) and end_t > expected[next_idx].t + win_s:
+        while next_idx < len(expected):
             ev = expected[next_idx]
-            results.append(ResultRow(
-                idx=ev.idx,
-                kind=ev.kind,
-                expected_t=ev.t,
-                expected_frame=ev.frame,
-                actual_t=None,
-                offset_ms=None,
-                verdict="miss",
-            ))
-            next_idx += 1
+
+            # Skip release events in press-only mode
+            if request.press_only_mode and ev.kind == "up":
+                next_idx += 1
+                continue
+
+            _, late_win_s = get_leniency_window(ev.idx)
+            if end_t > ev.t + late_win_s:
+                results.append(ResultRow(
+                    idx=ev.idx,
+                    kind=ev.kind,
+                    expected_t=ev.t,
+                    expected_frame=ev.frame,
+                    actual_t=None,
+                    offset_ms=None,
+                    verdict="miss",
+                ))
+                next_idx += 1
+            else:
+                break
 
         stats = compute_compact_stats(results, expected_count=len(expected))
-        return StatsResponse(**stats)
+
+        # Convert results to DetailedResult format
+        detailed_results = [
+            DetailedResult(
+                idx=r.idx,
+                kind=r.kind,
+                expected_t=r.expected_t,
+                expected_frame=r.expected_frame,
+                actual_t=r.actual_t,
+                offset_ms=r.offset_ms,
+                verdict=r.verdict
+            )
+            for r in results
+        ]
+
+        return StatsResponse(**stats, detailed_results=detailed_results)
 
     except HTTPException:
         raise
@@ -440,8 +534,24 @@ async def export_results(request: EvaluateRequest):
         if not expected:
             raise HTTPException(status_code=400, detail="No inputs found for this button/player")
 
-        # Same evaluation logic as above
-        win_s = request.hit_window_ms / 1000.0
+        # Load leniency configuration
+        leniency_config = load_leniency_config(request.map_name)
+
+        def get_leniency_window(event_idx: int) -> tuple[float, float]:
+            """Get early and late leniency windows for an event (in seconds)"""
+            idx_str = str(event_idx)
+            early_ms = leniency_config.default_early_ms
+            late_ms = leniency_config.default_late_ms
+
+            if idx_str in leniency_config.custom:
+                leniency = leniency_config.custom[idx_str]
+                if leniency.early_ms is not None:
+                    early_ms = leniency.early_ms
+                if leniency.late_ms is not None:
+                    late_ms = leniency.late_ms
+
+            return early_ms / 1000.0, late_ms / 1000.0
+
         results = []
         next_idx = 0
 
@@ -449,18 +559,32 @@ async def export_results(request: EvaluateRequest):
             actual_t = input_evt.actual_t
             kind = input_evt.kind
 
-            while next_idx < len(expected) and actual_t > expected[next_idx].t + win_s:
+            # Skip release events in press-only mode
+            if request.press_only_mode and kind == "up":
+                continue
+
+            while next_idx < len(expected):
                 ev = expected[next_idx]
-                results.append(ResultRow(
-                    idx=ev.idx,
-                    kind=ev.kind,
-                    expected_t=ev.t,
-                    expected_frame=ev.frame,
-                    actual_t=None,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
-                next_idx += 1
+
+                # Skip release events in press-only mode
+                if request.press_only_mode and ev.kind == "up":
+                    next_idx += 1
+                    continue
+
+                _, late_win_s = get_leniency_window(ev.idx)
+                if actual_t > ev.t + late_win_s:
+                    results.append(ResultRow(
+                        idx=ev.idx,
+                        kind=ev.kind,
+                        expected_t=ev.t,
+                        expected_frame=ev.frame,
+                        actual_t=None,
+                        offset_ms=None,
+                        verdict="miss",
+                    ))
+                    next_idx += 1
+                else:
+                    break
 
             if next_idx >= len(expected):
                 results.append(ResultRow(
@@ -488,7 +612,10 @@ async def export_results(request: EvaluateRequest):
                 continue
 
             dt = actual_t - ev.t
-            if abs(dt) <= win_s:
+            early_win_s, late_win_s = get_leniency_window(ev.idx)
+            is_hit = (dt < 0 and abs(dt) <= early_win_s) or (dt >= 0 and dt <= late_win_s)
+
+            if is_hit:
                 results.append(ResultRow(
                     idx=ev.idx,
                     kind=ev.kind,
@@ -510,21 +637,30 @@ async def export_results(request: EvaluateRequest):
                 ))
             next_idx += 1
 
-        # Mark remaining events as misses, matching original logic
-        # Only mark as miss if the event's hit window has closed (end_time > event.t + window)
+        # Mark remaining events as misses
         end_t = request.end_time if request.end_time is not None else float('inf')
-        while next_idx < len(expected) and end_t > expected[next_idx].t + win_s:
+        while next_idx < len(expected):
             ev = expected[next_idx]
-            results.append(ResultRow(
-                idx=ev.idx,
-                kind=ev.kind,
-                expected_t=ev.t,
-                expected_frame=ev.frame,
-                actual_t=None,
-                offset_ms=None,
-                verdict="miss",
-            ))
-            next_idx += 1
+
+            # Skip release events in press-only mode
+            if request.press_only_mode and ev.kind == "up":
+                next_idx += 1
+                continue
+
+            _, late_win_s = get_leniency_window(ev.idx)
+            if end_t > ev.t + late_win_s:
+                results.append(ResultRow(
+                    idx=ev.idx,
+                    kind=ev.kind,
+                    expected_t=ev.t,
+                    expected_frame=ev.frame,
+                    actual_t=None,
+                    offset_ms=None,
+                    verdict="miss",
+                ))
+                next_idx += 1
+            else:
+                break
 
         # Generate export content
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -726,6 +862,76 @@ async def delete_music(filename: str):
         return {"message": f"Music file {filename} deleted successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete music: {str(e)}")
+
+
+def get_leniency_path(map_name: str) -> Path:
+    """Get the path to the leniency file for a map"""
+    map_stem = Path(map_name).stem
+    return LENIENCY_DIR / f"{map_stem}.json"
+
+
+def load_leniency_config(map_name: str) -> LeniencyConfig:
+    """Load leniency configuration for a map, or return default"""
+    leniency_path = get_leniency_path(map_name)
+    if not leniency_path.exists():
+        return LeniencyConfig()
+
+    try:
+        with leniency_path.open("r") as f:
+            data = json.load(f)
+            # Convert custom dict values to EventLeniency objects
+            custom = {}
+            for idx, leniency in data.get("custom", {}).items():
+                custom[idx] = EventLeniency(**leniency)
+            return LeniencyConfig(
+                default_early_ms=data.get("default_early_ms", 20.833),
+                default_late_ms=data.get("default_late_ms", 20.833),
+                custom=custom
+            )
+    except Exception as e:
+        print(f"Error loading leniency config for {map_name}: {e}")
+        return LeniencyConfig()
+
+
+def save_leniency_config(map_name: str, config: LeniencyConfig):
+    """Save leniency configuration for a map"""
+    leniency_path = get_leniency_path(map_name)
+
+    try:
+        # Convert to JSON-serializable format
+        data = {
+            "default_early_ms": config.default_early_ms,
+            "default_late_ms": config.default_late_ms,
+            "custom": {
+                idx: {k: v for k, v in {"early_ms": leniency.early_ms, "late_ms": leniency.late_ms}.items() if v is not None}
+                for idx, leniency in config.custom.items()
+            }
+        }
+        with leniency_path.open("w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save leniency config: {str(e)}")
+
+
+@app.get("/api/maps/{map_name}/leniency", response_model=LeniencyConfig, response_model_exclude_none=True)
+async def get_leniency(map_name: str):
+    """Get leniency configuration for a map"""
+    map_path = MAPS_DIR / map_name
+    if not map_path.exists():
+        raise HTTPException(status_code=404, detail="Map not found")
+
+    return load_leniency_config(map_name)
+
+
+@app.put("/api/maps/{map_name}/leniency", response_model=LeniencyConfig)
+async def update_leniency(map_name: str, config: LeniencyConfig):
+    """Update leniency configuration for a map"""
+    map_path = MAPS_DIR / map_name
+    if not map_path.exists():
+        raise HTTPException(status_code=404, detail="Map not found")
+
+    save_leniency_config(map_name, config)
+    return config
 
 
 if __name__ == "__main__":
