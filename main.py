@@ -117,7 +117,7 @@ class EvaluateRequest(BaseModel):
 class DetailedResult(BaseModel):
     idx: int
     kind: str
-    expected_t: float
+    expected_t: Optional[float]
     expected_frame: int
     actual_t: Optional[float]
     offset_ms: Optional[float]
@@ -497,11 +497,13 @@ async def evaluate_results(request: EvaluateRequest):
         stats = compute_compact_stats(results, expected_count=len(expected))
 
         # Convert results to DetailedResult format
+        # Replace NaN values with None for JSON compliance
+        import math
         detailed_results = [
             DetailedResult(
                 idx=r.idx,
                 kind=r.kind,
-                expected_t=r.expected_t,
+                expected_t=None if math.isnan(r.expected_t) else r.expected_t,
                 expected_frame=r.expected_frame,
                 actual_t=r.actual_t,
                 offset_ms=r.offset_ms,
