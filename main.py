@@ -70,6 +70,7 @@ def calculate_storage_usage():
 class EventLeniency(BaseModel):
     early_ms: Optional[float] = None
     late_ms: Optional[float] = None
+    enabled: Optional[bool] = None  # If None, defaults to True
 
     class Config:
         exclude_none = True
@@ -365,6 +366,9 @@ async def evaluate_results(request: EvaluateRequest):
         # Load leniency configuration
         leniency_config = load_leniency_config(request.map_name)
 
+        # Filter out disabled events
+        expected = [ev for ev in expected if leniency_config.custom.get(str(ev.idx), EventLeniency()).enabled != False]
+
         def get_leniency_window(event_idx: int) -> tuple[float, float]:
             """Get early and late leniency windows for an event (in seconds)"""
             idx_str = str(event_idx)
@@ -521,6 +525,9 @@ async def export_results(request: EvaluateRequest):
 
         # Load leniency configuration
         leniency_config = load_leniency_config(request.map_name)
+
+        # Filter out disabled events
+        expected = [ev for ev in expected if leniency_config.custom.get(str(ev.idx), EventLeniency()).enabled != False]
 
         def get_leniency_window(event_idx: int) -> tuple[float, float]:
             """Get early and late leniency windows for an event (in seconds)"""
@@ -871,7 +878,7 @@ def save_leniency_config(map_name: str, config: LeniencyConfig):
             "default_early_ms": config.default_early_ms,
             "default_late_ms": config.default_late_ms,
             "custom": {
-                idx: {k: v for k, v in {"early_ms": leniency.early_ms, "late_ms": leniency.late_ms}.items() if v is not None}
+                idx: {k: v for k, v in {"early_ms": leniency.early_ms, "late_ms": leniency.late_ms, "enabled": leniency.enabled}.items() if v is not None}
                 for idx, leniency in config.custom.items()
             }
         }
