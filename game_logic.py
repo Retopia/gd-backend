@@ -103,9 +103,8 @@ def build_visual_notes(expected: List[ExpectedEvent], hold_min_frames: int) -> L
 
 def compute_compact_stats(results: List[ResultRow], expected_count: int) -> Dict[str, float]:
     """Compute statistics from results"""
-    hits = [r for r in results if r.verdict == "hit" and r.offset_ms is not None and not math.isnan(r.expected_t)]
-    misses = [r for r in results if r.verdict == "miss" and not math.isnan(r.expected_t)]
-    extras = [r for r in results if math.isnan(r.expected_t)]
+    hits = [r for r in results if r.verdict == "hit" and r.offset_ms is not None]
+    misses = [r for r in results if r.verdict == "miss"]
     hit_offsets = [r.offset_ms for r in hits if r.offset_ms is not None]
 
     # Separate early (negative) and late (positive) offsets
@@ -128,13 +127,13 @@ def compute_compact_stats(results: List[ResultRow], expected_count: int) -> Dict
         mae = 0.0
 
     # Completion = fraction of expected events that were judged (hit or miss)
-    judged = len([r for r in results if not math.isnan(r.expected_t)])
+    judged = len(results)  # All results are now hits or misses (no extras)
     completion = (judged / expected_count) if expected_count > 0 else 0.0
 
     return {
         "hits": float(len(hits)),
         "misses": float(len(misses)),
-        "extras": float(len(extras)),
+        "extras": 0.0,  # No longer tracking unexpected inputs
         "mean_early": float(mean_early),
         "mean_late": float(mean_late),
         "mae": float(mae),

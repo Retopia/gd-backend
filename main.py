@@ -416,29 +416,12 @@ async def evaluate_results(request: EvaluateRequest):
                 else:
                     break
 
+            # Skip inputs that don't match any expected event
             if next_idx >= len(expected):
-                results.append(ResultRow(
-                    idx=len(results),
-                    kind=kind,
-                    expected_t=float("nan"),
-                    expected_frame=-1,
-                    actual_t=actual_t,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
                 continue
 
             ev = expected[next_idx]
             if ev.kind != kind:
-                results.append(ResultRow(
-                    idx=len(results),
-                    kind=kind,
-                    expected_t=float("nan"),
-                    expected_frame=-1,
-                    actual_t=actual_t,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
                 continue
 
             dt = actual_t - ev.t
@@ -588,29 +571,12 @@ async def export_results(request: EvaluateRequest):
                 else:
                     break
 
+            # Skip inputs that don't match any expected event
             if next_idx >= len(expected):
-                results.append(ResultRow(
-                    idx=len(results),
-                    kind=kind,
-                    expected_t=float("nan"),
-                    expected_frame=-1,
-                    actual_t=actual_t,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
                 continue
 
             ev = expected[next_idx]
             if ev.kind != kind:
-                results.append(ResultRow(
-                    idx=len(results),
-                    kind=kind,
-                    expected_t=float("nan"),
-                    expected_frame=-1,
-                    actual_t=actual_t,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
                 continue
 
             dt = actual_t - ev.t
