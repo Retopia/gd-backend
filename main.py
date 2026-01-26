@@ -384,52 +384,51 @@ async def evaluate_results(request: EvaluateRequest):
 
             return early_ms / 1000.0, late_ms / 1000.0
 
+        # Track which inputs have been matched
+        matched_inputs = set()
         results = []
-        next_idx = 0
 
-        # Process input events
-        for input_evt in request.input_events:
-            actual_t = input_evt.actual_t
-            kind = input_evt.kind
+        # Maximum search window: only match inputs within this range (in seconds)
+        MAX_SEARCH_WINDOW = 2.0  # 2 seconds - inputs further than this won't be matched
 
+        # Get end time for filtering events
+        end_t = request.end_time if request.end_time is not None else float('inf')
+
+        # For each expected event that was reached, find the best matching input
+        for ev in expected:
             # Skip release events in press-only mode
-            if request.press_only_mode and kind == "up":
+            if request.press_only_mode and ev.kind == "up":
                 continue
 
-            # Mark misses for events that have passed (using late window since that's the positive offset)
-            while next_idx < len(expected):
-                ev = expected[next_idx]
-
-                # Skip release events in press-only mode
-                if request.press_only_mode and ev.kind == "up":
-                    next_idx += 1
-                    continue
-
-                _, late_win_s = get_leniency_window(ev.idx)
-                if actual_t > ev.t + late_win_s:
-                    results.append(ResultRow(
-                        idx=ev.idx,
-                        kind=ev.kind,
-                        expected_t=ev.t,
-                        expected_frame=ev.frame,
-                        actual_t=None,
-                        offset_ms=None,
-                        verdict="miss",
-                    ))
-                    next_idx += 1
-                else:
-                    break
-
-            # Skip inputs that don't match any expected event
-            if next_idx >= len(expected):
-                continue
-
-            ev = expected[next_idx]
-            if ev.kind != kind:
-                continue
-
-            dt = actual_t - ev.t
+            # Only process events that were reached (with late window considered)
             early_win_s, late_win_s = get_leniency_window(ev.idx)
+            if end_t <= ev.t + late_win_s:
+                break  # All remaining events were not reached
+
+            # Find all inputs of the same kind within the search window
+            candidates = [
+                (i, inp) for i, inp in enumerate(request.input_events)
+                if inp.kind == ev.kind and i not in matched_inputs
+                and not (request.press_only_mode and inp.kind == "up")
+                and abs(inp.actual_t - ev.t) <= MAX_SEARCH_WINDOW
+            ]
+
+            if not candidates:
+                # No input for this event within search window
+                results.append(ResultRow(
+                    idx=ev.idx,
+                    kind=ev.kind,
+                    expected_t=ev.t,
+                    expected_frame=ev.frame,
+                    actual_t=None,
+                    offset_ms=None,
+                    verdict="miss",
+                ))
+                continue
+
+            # Find the closest input within search window
+            closest_idx, closest_inp = min(candidates, key=lambda x: abs(x[1].actual_t - ev.t))
+            dt = closest_inp.actual_t - ev.t
 
             # Check if within leniency window (asymmetric)
             is_hit = (dt < 0 and abs(dt) <= early_win_s) or (dt >= 0 and dt <= late_win_s)
@@ -440,46 +439,54 @@ async def evaluate_results(request: EvaluateRequest):
                     kind=ev.kind,
                     expected_t=ev.t,
                     expected_frame=ev.frame,
-                    actual_t=actual_t,
+                    actual_t=closest_inp.actual_t,
                     offset_ms=dt * 1000.0,
                     verdict="hit",
                 ))
+                matched_inputs.add(closest_idx)
             else:
+                # Miss but show the closest input
                 results.append(ResultRow(
                     idx=ev.idx,
                     kind=ev.kind,
                     expected_t=ev.t,
                     expected_frame=ev.frame,
-                    actual_t=actual_t,
+                    actual_t=closest_inp.actual_t,
                     offset_ms=dt * 1000.0,
                     verdict="miss",
                 ))
-            next_idx += 1
+                matched_inputs.add(closest_idx)
 
-        # Mark remaining events as misses
-        end_t = request.end_time if request.end_time is not None else float('inf')
-        while next_idx < len(expected):
-            ev = expected[next_idx]
+        # Add unexpected inputs (inputs that weren't matched to any expected event)
+        for i, inp in enumerate(request.input_events):
+            if i not in matched_inputs and not (request.press_only_mode and inp.kind == "up"):
+                # Find closest expected event of same kind to show offset
+                same_kind_events = [e for e in expected if e.kind == inp.kind]
+                if same_kind_events:
+                    closest_ev = min(same_kind_events, key=lambda e: abs(e.t - inp.actual_t))
+                    dt = inp.actual_t - closest_ev.t
+                    results.append(ResultRow(
+                        idx=closest_ev.idx,  # Use closest event's index for reference
+                        kind=inp.kind,
+                        expected_t=closest_ev.t,
+                        expected_frame=closest_ev.frame,
+                        actual_t=inp.actual_t,
+                        offset_ms=dt * 1000.0,
+                        verdict="unexpected",
+                    ))
+                else:
+                    results.append(ResultRow(
+                        idx=-1,
+                        kind=inp.kind,
+                        expected_t=float('nan'),
+                        expected_frame=0,
+                        actual_t=inp.actual_t,
+                        offset_ms=None,
+                        verdict="unexpected",
+                    ))
 
-            # Skip release events in press-only mode
-            if request.press_only_mode and ev.kind == "up":
-                next_idx += 1
-                continue
-
-            _, late_win_s = get_leniency_window(ev.idx)
-            if end_t > ev.t + late_win_s:
-                results.append(ResultRow(
-                    idx=ev.idx,
-                    kind=ev.kind,
-                    expected_t=ev.t,
-                    expected_frame=ev.frame,
-                    actual_t=None,
-                    offset_ms=None,
-                    verdict="miss",
-                ))
-                next_idx += 1
-            else:
-                break
+        # Sort results by time (expected_t for expected events, actual_t for unexpected)
+        results.sort(key=lambda r: r.actual_t if r.actual_t is not None else r.expected_t)
 
         stats = compute_compact_stats(results, expected_count=len(expected))
 
@@ -544,86 +551,37 @@ async def export_results(request: EvaluateRequest):
 
             return early_ms / 1000.0, late_ms / 1000.0
 
+        # Track which inputs have been matched
+        matched_inputs = set()
         results = []
-        next_idx = 0
 
-        for input_evt in request.input_events:
-            actual_t = input_evt.actual_t
-            kind = input_evt.kind
+        # Maximum search window: only match inputs within this range (in seconds)
+        MAX_SEARCH_WINDOW = 2.0  # 2 seconds - inputs further than this won't be matched
 
-            # Skip release events in press-only mode
-            if request.press_only_mode and kind == "up":
-                continue
-
-            while next_idx < len(expected):
-                ev = expected[next_idx]
-
-                # Skip release events in press-only mode
-                if request.press_only_mode and ev.kind == "up":
-                    next_idx += 1
-                    continue
-
-                _, late_win_s = get_leniency_window(ev.idx)
-                if actual_t > ev.t + late_win_s:
-                    results.append(ResultRow(
-                        idx=ev.idx,
-                        kind=ev.kind,
-                        expected_t=ev.t,
-                        expected_frame=ev.frame,
-                        actual_t=None,
-                        offset_ms=None,
-                        verdict="miss",
-                    ))
-                    next_idx += 1
-                else:
-                    break
-
-            # Skip inputs that don't match any expected event
-            if next_idx >= len(expected):
-                continue
-
-            ev = expected[next_idx]
-            if ev.kind != kind:
-                continue
-
-            dt = actual_t - ev.t
-            early_win_s, late_win_s = get_leniency_window(ev.idx)
-            is_hit = (dt < 0 and abs(dt) <= early_win_s) or (dt >= 0 and dt <= late_win_s)
-
-            if is_hit:
-                results.append(ResultRow(
-                    idx=ev.idx,
-                    kind=ev.kind,
-                    expected_t=ev.t,
-                    expected_frame=ev.frame,
-                    actual_t=actual_t,
-                    offset_ms=dt * 1000.0,
-                    verdict="hit",
-                ))
-            else:
-                results.append(ResultRow(
-                    idx=ev.idx,
-                    kind=ev.kind,
-                    expected_t=ev.t,
-                    expected_frame=ev.frame,
-                    actual_t=actual_t,
-                    offset_ms=dt * 1000.0,
-                    verdict="miss",
-                ))
-            next_idx += 1
-
-        # Mark remaining events as misses
+        # Get end time for filtering events
         end_t = request.end_time if request.end_time is not None else float('inf')
-        while next_idx < len(expected):
-            ev = expected[next_idx]
 
+        # For each expected event that was reached, find the best matching input
+        for ev in expected:
             # Skip release events in press-only mode
             if request.press_only_mode and ev.kind == "up":
-                next_idx += 1
                 continue
 
-            _, late_win_s = get_leniency_window(ev.idx)
-            if end_t > ev.t + late_win_s:
+            # Only process events that were reached (with late window considered)
+            early_win_s, late_win_s = get_leniency_window(ev.idx)
+            if end_t <= ev.t + late_win_s:
+                break  # All remaining events were not reached
+
+            # Find all inputs of the same kind within the search window
+            candidates = [
+                (i, inp) for i, inp in enumerate(request.input_events)
+                if inp.kind == ev.kind and i not in matched_inputs
+                and not (request.press_only_mode and inp.kind == "up")
+                and abs(inp.actual_t - ev.t) <= MAX_SEARCH_WINDOW
+            ]
+
+            if not candidates:
+                # No input for this event within search window
                 results.append(ResultRow(
                     idx=ev.idx,
                     kind=ev.kind,
@@ -633,9 +591,66 @@ async def export_results(request: EvaluateRequest):
                     offset_ms=None,
                     verdict="miss",
                 ))
-                next_idx += 1
+                continue
+
+            # Find the closest input within search window
+            closest_idx, closest_inp = min(candidates, key=lambda x: abs(x[1].actual_t - ev.t))
+            dt = closest_inp.actual_t - ev.t
+
+            # Check if within leniency window (asymmetric)
+            is_hit = (dt < 0 and abs(dt) <= early_win_s) or (dt >= 0 and dt <= late_win_s)
+
+            if is_hit:
+                results.append(ResultRow(
+                    idx=ev.idx,
+                    kind=ev.kind,
+                    expected_t=ev.t,
+                    expected_frame=ev.frame,
+                    actual_t=closest_inp.actual_t,
+                    offset_ms=dt * 1000.0,
+                    verdict="hit",
+                ))
+                matched_inputs.add(closest_idx)
             else:
-                break
+                # Miss but show the closest input
+                results.append(ResultRow(
+                    idx=ev.idx,
+                    kind=ev.kind,
+                    expected_t=ev.t,
+                    expected_frame=ev.frame,
+                    actual_t=closest_inp.actual_t,
+                    offset_ms=dt * 1000.0,
+                    verdict="miss",
+                ))
+                matched_inputs.add(closest_idx)
+
+        # Add unexpected inputs (inputs that weren't matched to any expected event)
+        for i, inp in enumerate(request.input_events):
+            if i not in matched_inputs and not (request.press_only_mode and inp.kind == "up"):
+                # Find closest expected event of same kind to show offset
+                same_kind_events = [e for e in expected if e.kind == inp.kind]
+                if same_kind_events:
+                    closest_ev = min(same_kind_events, key=lambda e: abs(e.t - inp.actual_t))
+                    dt = inp.actual_t - closest_ev.t
+                    results.append(ResultRow(
+                        idx=closest_ev.idx,  # Use closest event's index for reference
+                        kind=inp.kind,
+                        expected_t=closest_ev.t,
+                        expected_frame=closest_ev.frame,
+                        actual_t=inp.actual_t,
+                        offset_ms=dt * 1000.0,
+                        verdict="unexpected",
+                    ))
+                else:
+                    results.append(ResultRow(
+                        idx=-1,
+                        kind=inp.kind,
+                        expected_t=float('nan'),
+                        expected_frame=0,
+                        actual_t=inp.actual_t,
+                        offset_ms=None,
+                        verdict="unexpected",
+                    ))
 
         # Generate export content
         timestamp = time.strftime("%Y%m%d_%H%M%S")

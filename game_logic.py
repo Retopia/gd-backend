@@ -105,11 +105,14 @@ def compute_compact_stats(results: List[ResultRow], expected_count: int) -> Dict
     """Compute statistics from results"""
     hits = [r for r in results if r.verdict == "hit" and r.offset_ms is not None]
     misses = [r for r in results if r.verdict == "miss"]
-    hit_offsets = [r.offset_ms for r in hits if r.offset_ms is not None]
+    unexpected = [r for r in results if r.verdict == "unexpected"]
+
+    # Get ALL offsets (hits, misses, AND unexpected inputs with offsets)
+    all_offsets = [r.offset_ms for r in results if r.offset_ms is not None]
 
     # Separate early (negative) and late (positive) offsets
-    early_offsets = [x for x in hit_offsets if x < 0]
-    late_offsets = [x for x in hit_offsets if x > 0]
+    early_offsets = [x for x in all_offsets if x < 0]
+    late_offsets = [x for x in all_offsets if x > 0]
 
     if early_offsets:
         mean_early = sum(early_offsets) / len(early_offsets)
@@ -121,19 +124,19 @@ def compute_compact_stats(results: List[ResultRow], expected_count: int) -> Dict
     else:
         mean_late = 0.0
 
-    if hit_offsets:
-        mae = sum(abs(x) for x in hit_offsets) / len(hit_offsets)
+    if all_offsets:
+        mae = sum(abs(x) for x in all_offsets) / len(all_offsets)
     else:
         mae = 0.0
 
-    # Completion = fraction of expected events that were judged (hit or miss)
-    judged = len(results)  # All results are now hits or misses (no extras)
+    # Completion = fraction of expected events that were judged (hit or miss, not unexpected)
+    judged = len([r for r in results if r.verdict in ["hit", "miss"]])
     completion = (judged / expected_count) if expected_count > 0 else 0.0
 
     return {
         "hits": float(len(hits)),
         "misses": float(len(misses)),
-        "extras": 0.0,  # No longer tracking unexpected inputs
+        "extras": float(len(unexpected)),
         "mean_early": float(mean_early),
         "mean_late": float(mean_late),
         "mae": float(mae),
